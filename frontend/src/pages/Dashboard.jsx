@@ -67,8 +67,7 @@ export default function Dashboard({ setActiveTab, onOpenUpload }) {
     { label: 'Total Papers', value: analytics?.total_papers || 0, icon: BookOpen, color: 'text-blue-500', bg: 'bg-blue-50 dark:bg-blue-950/40' },
     { label: 'Research Projects', value: analytics?.total_projects || 0, icon: Layers, color: 'text-indigo-500', bg: 'bg-indigo-50 dark:bg-indigo-950/40' },
     { label: 'AI Inquiries', value: analytics?.total_chat_sessions || 0, icon: MessageSquare, color: 'text-teal-500', bg: 'bg-teal-50 dark:bg-teal-950/40' },
-    { label: 'Comparisons', value: analytics?.total_comparisons || 0, icon: GitCompare, color: 'text-amber-500', bg: 'bg-amber-50 dark:bg-amber-950/40' },
-    { label: 'Literature Reviews', value: analytics?.total_reviews || 0, icon: FileText, color: 'text-emerald-500', bg: 'bg-emerald-50 dark:bg-emerald-950/40' },
+    { label: 'Methodology Comparisons', value: analytics?.total_comparisons || 0, icon: GitCompare, color: 'text-amber-500', bg: 'bg-amber-50 dark:bg-amber-950/40' },
   ];
 
   return (
@@ -77,13 +76,13 @@ export default function Dashboard({ setActiveTab, onOpenUpload }) {
       <div className="p-5 sm:p-6 rounded-2xl bg-gradient-to-r from-academic-900 via-academic-800 to-navy-900 text-white shadow-lg relative overflow-hidden border border-academic-700/30">
         <div className="relative z-10 max-w-2xl space-y-2">
           <div className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-academic-500/20 text-academic-300 text-xs font-semibold border border-academic-400/20">
-            <Sparkles className="w-3.5 h-3.5" /> AI Literature Review Assistant
+            <Sparkles className="w-3.5 h-3.5" /> AI Academic Research Assistant
           </div>
           <h2 className="text-xl sm:text-2xl font-extrabold tracking-tight">
-            Accelerate Your Academic Research & Literature Review
+            Accelerate Your Academic Literature Research
           </h2>
           <p className="text-xs sm:text-sm text-slate-300 leading-relaxed">
-            Ingest multiple peer-reviewed papers, query with grounded citations, extract research gaps, and produce structured literature reviews in seconds.
+            Ingest multiple peer-reviewed papers, query with grounded page citations, and contrast research methodologies side-by-side in seconds.
           </p>
           <div className="pt-2 flex flex-wrap gap-2.5 sm:gap-3">
             <button
@@ -105,7 +104,7 @@ export default function Dashboard({ setActiveTab, onOpenUpload }) {
       </div>
 
       {/* Metrics Row */}
-      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3 sm:gap-4">
+      <div className="grid grid-cols-2 sm:grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
         {statCards.map((stat, i) => {
           const Icon = stat.icon;
           return (

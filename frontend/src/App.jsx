@@ -9,8 +9,6 @@ import Dashboard from './pages/Dashboard';
 import Library from './pages/Library';
 import Assistant from './pages/Assistant';
 import Comparison from './pages/Comparison';
-import GapAnalyzer from './pages/GapAnalyzer';
-import LiteratureReview from './pages/LiteratureReview';
 import Auth from './pages/Auth';
 import { Loader2 } from 'lucide-react';
 
@@ -44,10 +42,6 @@ function MainApp() {
         return <Assistant />;
       case 'comparison':
         return <Comparison />;
-      case 'gaps':
-        return <GapAnalyzer />;
-      case 'reviews':
-        return <LiteratureReview />;
       default:
         return <Dashboard setActiveTab={setActiveTab} onOpenUpload={() => setIsUploadOpen(true)} />;
     }

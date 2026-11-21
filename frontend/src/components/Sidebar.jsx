@@ -32,8 +32,6 @@ export default function Sidebar({ activeTab, setActiveTab, isOpen, onClose }) {
     { id: 'library', label: 'Paper Library', icon: BookOpen },
     { id: 'assistant', label: 'AI Research Assistant', icon: Bot, badge: 'RAG' },
     { id: 'comparison', label: 'Paper Comparison', icon: GitCompare },
-    { id: 'gaps', label: 'Research Gap Analyzer', icon: Compass },
-    { id: 'reviews', label: 'Literature Reviews', icon: FileText, badge: 'Export' },
   ];
 
   const handleCreateProject = async (e) => {
