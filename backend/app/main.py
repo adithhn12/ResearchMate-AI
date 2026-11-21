@@ -1,4 +1,14 @@
 import os
+import sys
+from pathlib import Path
+
+# Add backend directory to sys.path so 'app' package resolves whether launched
+# from repository root (e.g. uvicorn backend.app.main:app), from backend/ (e.g. uvicorn app.main:app),
+# or via root main:app wrapper
+BACKEND_DIR = Path(__file__).resolve().parent.parent
+if str(BACKEND_DIR) not in sys.path:
+    sys.path.insert(0, str(BACKEND_DIR))
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -58,5 +68,10 @@ def root():
     }
 
 @app.get("/health")
+@app.get(f"{settings.API_V1_STR}/health")
 def health():
-    return {"status": "healthy"}
+    return {
+        "status": "healthy",
+        "app": settings.PROJECT_NAME,
+        "version": settings.VERSION
+    }

@@ -181,8 +181,9 @@ ResearchMate AI is architected for seamless production deployment with a decoupl
 
 2. **Manual Web Service Configuration** (if not using blueprint):
    - **Environment**: `Python`
+   - **Root Directory**: Leave blank (repository root)
    - **Build Command**: `pip install -r backend/requirements.txt`
-   - **Start Command**: `cd backend && uvicorn app.main:app --host 0.0.0.0 --port $PORT`
+   - **Start Command**: `uvicorn main:app --host 0.0.0.0 --port $PORT`
    - **Plan**: Starter or higher (required for persistent disk).
 
 3. **Attach Persistent Storage (Critical)**:
