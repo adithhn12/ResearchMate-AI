@@ -1,5 +1,6 @@
 import os
 import sys
+import logging
 from pathlib import Path
 
 # Add backend directory to sys.path so 'app' package resolves whether launched
@@ -8,6 +9,9 @@ from pathlib import Path
 BACKEND_DIR = Path(__file__).resolve().parent.parent
 if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("researchmate.app")
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -75,3 +79,18 @@ def health():
         "app": settings.PROJECT_NAME,
         "version": settings.VERSION
     }
+
+@app.on_event("startup")
+def log_startup_routes():
+    logger.info("=" * 60)
+    logger.info(f"ResearchMate AI Backend Online (v{settings.VERSION})")
+    logger.info(f"API V1 Prefix: {settings.API_V1_STR}")
+    logger.info(f"Docs URL: /docs | OpenAPI: /openapi.json")
+    logger.info(f"Health Checks: /health and {settings.API_V1_STR}/health")
+    logger.info(f"CORS Allowed Origins: {settings.CORS_ORIGINS}")
+    logger.info("Registered API Endpoints:")
+    schema = app.openapi()
+    for path, path_item in schema.get("paths", {}).items():
+        methods = [m.upper() for m in path_item.keys() if m != "parameters"]
+        logger.info(f"  [{','.join(methods):<15}] {path}")
+    logger.info("=" * 60)

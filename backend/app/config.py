@@ -14,7 +14,20 @@ else:
 
 # Production persistent disk directory (e.g., Render disk mounted at /var/data)
 DATA_DIR_ENV = os.getenv("DATA_DIR")
-STORAGE_ROOT = Path(DATA_DIR_ENV) if DATA_DIR_ENV else BASE_DIR
+if DATA_DIR_ENV:
+    try:
+        p = Path(DATA_DIR_ENV)
+        p.mkdir(parents=True, exist_ok=True)
+        # Test write permission
+        test_file = p / ".write_test"
+        test_file.touch()
+        test_file.unlink()
+        STORAGE_ROOT = p
+    except Exception:
+        # Fallback to local BASE_DIR if persistent mount path is inaccessible
+        STORAGE_ROOT = BASE_DIR
+else:
+    STORAGE_ROOT = BASE_DIR
 
 class Settings:
     PROJECT_NAME: str = "ResearchMate AI"
