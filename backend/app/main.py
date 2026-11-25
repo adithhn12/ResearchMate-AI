@@ -13,11 +13,13 @@ if str(BACKEND_DIR) not in sys.path:
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("researchmate.app")
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
+from sqlalchemy import text
 from app.config import settings
-from app.database import engine, Base
+from app.database import engine, Base, SessionLocal
 from app.services.vector_store import vector_store
 from app.routers import (
     auth,
@@ -40,13 +42,32 @@ app = FastAPI(
 )
 
 # CORS middleware supporting localhost and production Vercel frontend
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=settings.CORS_ORIGINS,
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+cors_origins = settings.CORS_ORIGINS
+if cors_origins == ["*"]:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origin_regex=".*",
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+else:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=cors_origins,
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
+
+@app.exception_handler(Exception)
+def unhandled_exception_handler(request: Request, exc: Exception):
+    logger.exception(f"Unhandled error on {request.method} {request.url.path}: {exc}")
+    return JSONResponse(
+        status_code=500,
+        content={"detail": f"Internal server error: {str(exc)}"},
+    )
 
 # Register routers
 app.include_router(auth.router, prefix=settings.API_V1_STR)
@@ -75,10 +96,18 @@ def root():
 @app.get("/health")
 @app.get(f"{settings.API_V1_STR}/health")
 def health():
+    db_status = "healthy"
+    try:
+        with SessionLocal() as db:
+            db.execute(text("SELECT 1"))
+    except Exception as exc:
+        logger.error(f"Healthcheck DB error: {exc}")
+        db_status = f"error: {exc}"
     return {
-        "status": "healthy",
+        "status": "healthy" if db_status == "healthy" else "degraded",
+        "database": db_status,
         "app": settings.PROJECT_NAME,
-        "version": settings.VERSION
+        "version": settings.VERSION,
     }
 
 @app.on_event("startup")

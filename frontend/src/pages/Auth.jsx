@@ -11,6 +11,24 @@ export default function Auth() {
   const [loading, setLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState('');
 
+  const extractAuthError = (err, fallback) => {
+    const status = err.response?.status;
+    const detail = err.response?.data?.detail;
+    if (typeof detail === 'string' && detail.trim()) {
+      return detail;
+    }
+    if (Array.isArray(detail) && detail.length > 0) {
+      return detail.map(d => d.msg || JSON.stringify(d)).join('; ');
+    }
+    if (status) {
+      return `${fallback} (HTTP ${status})`;
+    }
+    if (err.message) {
+      return `Unable to reach backend server (${err.message}).`;
+    }
+    return fallback;
+  };
+
   const handleSubmit = async (e) => {
     e.preventDefault();
     setErrorMsg('');
@@ -23,7 +41,7 @@ export default function Auth() {
       }
     } catch (err) {
       console.error(err);
-      setErrorMsg(err.response?.data?.detail || "Authentication failed. Please verify credentials.");
+      setErrorMsg(extractAuthError(err, "Authentication failed."));
     } finally {
       setLoading(false);
     }
@@ -36,7 +54,7 @@ export default function Auth() {
       await demoLogin();
     } catch (err) {
       console.error(err);
-      setErrorMsg("Demo login failed. Please try manual login.");
+      setErrorMsg(extractAuthError(err, "Demo login failed."));
     } finally {
       setLoading(false);
     }

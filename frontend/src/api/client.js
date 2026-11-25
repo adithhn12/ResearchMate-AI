@@ -2,7 +2,7 @@ import axios from 'axios';
 
 const getApiBaseUrl = () => {
   if (import.meta.env.VITE_API_URL) {
-    let url = import.meta.env.VITE_API_URL.replace(/\/+$/, '');
+    let url = import.meta.env.VITE_API_URL.trim().replace(/\/+$/, '');
     if (!url.endsWith('/api/v1')) {
       url += '/api/v1';
     }
@@ -15,6 +15,7 @@ const API_BASE_URL = getApiBaseUrl();
 
 const apiClient = axios.create({
   baseURL: API_BASE_URL,
+  timeout: 30000,
 });
 
 // Attach Authorization header if token exists

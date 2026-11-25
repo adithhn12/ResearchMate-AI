@@ -74,6 +74,11 @@ def delete_project(project_id: int, db: Session = Depends(get_db), current_user:
     # Delete vector store collection
     vector_store.delete_project_collection(project_id)
 
+    # Clear project reference on activity logs to satisfy foreign key constraints
+    db.query(ActivityLog).filter(ActivityLog.project_id == project_id).update(
+        {"project_id": None}, synchronize_session=False
+    )
+
     db.delete(proj)
     db.commit()
     return {"message": "Project deleted successfully"}

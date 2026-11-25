@@ -35,12 +35,12 @@ class Settings:
     API_V1_STR: str = "/api/v1"
     
     # Security
-    SECRET_KEY: str = os.getenv("SECRET_KEY", "researchmate-ai-super-secret-key-change-in-prod-2026")
+    SECRET_KEY: str = os.getenv("SECRET_KEY") or "researchmate-ai-super-secret-key-change-in-prod-2026"
     ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24 * 7  # 7 days
     
     # CORS Origins (comma-separated or * for wildcard)
-    CORS_ORIGINS_RAW: str = os.getenv("CORS_ORIGINS", "*")
+    CORS_ORIGINS_RAW: str = os.getenv("CORS_ORIGINS") or "*"
     @property
     def CORS_ORIGINS(self):
         if self.CORS_ORIGINS_RAW.strip() == "*":
@@ -53,7 +53,12 @@ class Settings:
     GEMINI_MODEL: str = os.getenv("GEMINI_MODEL", "gemini-flash-lite-latest")
     
     # Storage & DB (persistent across deployments when DATA_DIR is configured)
-    DATABASE_URL: str = os.getenv("DATABASE_URL", f"sqlite:///{STORAGE_ROOT / 'researchmate.db'}")
+    _RAW_DATABASE_URL: str = os.getenv("DATABASE_URL") or f"sqlite:///{STORAGE_ROOT / 'researchmate.db'}"
+    DATABASE_URL: str = (
+        _RAW_DATABASE_URL.replace("postgres://", "postgresql://", 1)
+        if _RAW_DATABASE_URL.startswith("postgres://")
+        else _RAW_DATABASE_URL
+    )
     CHROMA_PERSIST_DIR: str = os.getenv("CHROMA_PERSIST_DIR", str(STORAGE_ROOT / "chroma_data"))
     UPLOAD_DIR: str = os.getenv("UPLOAD_DIR", str(STORAGE_ROOT / "uploaded_papers"))
     
