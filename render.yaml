@@ -4,8 +4,10 @@ services:
     env: python
     region: oregon
     plan: starter
-    buildCommand: pip install -r backend/requirements.txt
-    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    buildCommand: >-
+      pip install -r backend/requirements.txt &&
+      python -c "from pathlib import Path; from chromadb.utils.embedding_functions.onnx_mini_lm_l6_v2 import ONNXMiniLM_L6_V2; d = ONNXMiniLM_L6_V2(); d.DOWNLOAD_PATH = Path('backend/.model_cache/all-MiniLM-L6-v2'); d.DOWNLOAD_PATH.mkdir(parents=True, exist_ok=True); d._download_model_if_not_exists(); print('Cached ONNX model to', d.DOWNLOAD_PATH)"
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT --workers 1
     disk:
       name: researchmate-storage
       mountPath: /var/data
@@ -23,3 +25,15 @@ services:
         value: "*"
       - key: PYTHON_VERSION
         value: 3.12.0
+      - key: OMP_NUM_THREADS
+        value: "1"
+      - key: OPENBLAS_NUM_THREADS
+        value: "1"
+      - key: MKL_NUM_THREADS
+        value: "1"
+      - key: ORT_NUM_THREADS
+        value: "1"
+      - key: TOKENIZERS_PARALLELISM
+        value: "false"
+      - key: MALLOC_ARENA_MAX
+        value: "2"

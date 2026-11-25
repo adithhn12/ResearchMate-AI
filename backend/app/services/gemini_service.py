@@ -53,11 +53,12 @@ class GeminiService:
 
         last_error = None
         for m in unique_models:
-            # 1. Try modern google-genai
+            # 1. Try modern google-genai (reuse singleton client)
             try:
-                from google import genai
-                client = genai.Client(api_key=self.api_key)
-                response = client.models.generate_content(
+                if not getattr(self, "genai_client", None):
+                    from google import genai
+                    self.genai_client = genai.Client(api_key=self.api_key)
+                response = self.genai_client.models.generate_content(
                     model=m,
                     contents=prompt,
                     config={"temperature": temperature}

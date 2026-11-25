@@ -34,16 +34,55 @@ export default function UploadModal({ isOpen, onClose, onUploadSuccess }) {
 
     try {
       const res = await papersApi.upload(selectedProject.id, formData);
-      setSuccessCount(res.data.length);
-      setTimeout(() => {
-        setFiles([]);
+      const uploaded = Array.isArray(res.data) ? res.data : [];
+      const indexed = uploaded.filter(p => p.status === 'indexed');
+      const failed = uploaded.filter(p => p.status === 'failed');
+
+      if (failed.length > 0) {
+        const failDetails = failed
+          .map(p => `${p.file_name}: ${p.error_message || 'Processing failed'}`)
+          .join('; ');
+        setErrorMsg(
+          indexed.length > 0
+            ? `Indexed ${indexed.length} paper(s), but ${failed.length} failed — ${failDetails}`
+            : `Failed to process PDF(s): ${failDetails}`
+        );
+      }
+
+      if (indexed.length > 0) {
+        setSuccessCount(indexed.length);
+        setTimeout(() => {
+          setFiles([]);
+          setIsUploading(false);
+          if (failed.length === 0) {
+            onClose();
+          }
+          if (onUploadSuccess) onUploadSuccess();
+        }, 1200);
+      } else {
         setIsUploading(false);
-        onClose();
-        if (onUploadSuccess) onUploadSuccess();
-      }, 1200);
+      }
     } catch (err) {
       console.error("Upload error:", err);
-      setErrorMsg("Failed to upload papers. Ensure files are valid PDFs.");
+      const status = err.response?.status;
+      const detail = err.response?.data?.detail;
+      let message = "Failed to upload papers.";
+
+      if (typeof detail === 'string' && detail.trim()) {
+        message = detail;
+      } else if (Array.isArray(detail) && detail.length > 0) {
+        message = detail.map(d => d.msg || JSON.stringify(d)).join('; ');
+      } else if (status === 502 || status === 504) {
+        message = `Server unavailable or timed out (HTTP ${status}) while processing PDFs. Try uploading fewer or smaller files.`;
+      } else if (status === 413) {
+        message = "Uploaded PDF file(s) exceed the server size limit.";
+      } else if (status === 401) {
+        message = "Your session has expired. Please sign in again.";
+      } else if (err.message) {
+        message = `Upload request failed: ${err.message}`;
+      }
+
+      setErrorMsg(message);
       setIsUploading(false);
     }
   };

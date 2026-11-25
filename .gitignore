@@ -12,6 +12,7 @@ __pycache__/
 *.sqlite3
 chroma_data/
 uploaded_papers/
+.model_cache/
 sample_papers/*.pdf
 
 # Build outputs

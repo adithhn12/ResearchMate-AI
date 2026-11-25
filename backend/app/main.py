@@ -18,6 +18,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from app.config import settings
 from app.database import engine, Base
+from app.services.vector_store import vector_store
 from app.routers import (
     auth,
     projects,
@@ -82,6 +83,11 @@ def health():
 
 @app.on_event("startup")
 def log_startup_routes():
+    try:
+        vector_store.warmup_if_cached()
+    except Exception as e:
+        logger.warning(f"Embedding warmup skipped: {e}")
+
     logger.info("=" * 60)
     logger.info(f"ResearchMate AI Backend Online (v{settings.VERSION})")
     logger.info(f"API V1 Prefix: {settings.API_V1_STR}")
