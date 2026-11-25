@@ -1,5 +1,5 @@
-import React, { useState } from 'react';
-import { Upload, X, FileText, CheckCircle2, AlertCircle, Loader2 } from 'lucide-react';
+import React, { useState, useEffect, useRef } from 'react';
+import { Upload, X, FileText, CheckCircle2, AlertCircle, Loader2, Clock } from 'lucide-react';
 import { papersApi } from '../api/client';
 import { useProject } from '../contexts/ProjectContext';
 import Modal from './Modal';
@@ -10,6 +10,25 @@ export default function UploadModal({ isOpen, onClose, onUploadSuccess }) {
   const [isUploading, setIsUploading] = useState(false);
   const [errorMsg, setErrorMsg] = useState('');
   const [successCount, setSuccessCount] = useState(0);
+  const [jobStatuses, setJobStatuses] = useState([]);
+  const pollTimerRef = useRef(null);
+
+  const stopPolling = () => {
+    if (pollTimerRef.current) {
+      clearInterval(pollTimerRef.current);
+      pollTimerRef.current = null;
+    }
+  };
+
+  useEffect(() => {
+    return () => stopPolling();
+  }, []);
+
+  const handleClose = () => {
+    stopPolling();
+    setIsUploading(false);
+    onClose();
+  };
 
   const handleFileChange = (e) => {
     if (e.target.files) {
@@ -22,11 +41,64 @@ export default function UploadModal({ isOpen, onClose, onUploadSuccess }) {
     setFiles(prev => prev.filter((_, i) => i !== index));
   };
 
+  const finalizeStatuses = (papersList) => {
+    const indexed = papersList.filter(p => p.status === 'indexed');
+    const failed = papersList.filter(p => p.status === 'failed');
+
+    if (failed.length > 0) {
+      const failDetails = failed
+        .map(p => `${p.file_name}: ${p.error_message || 'Processing failed'}`)
+        .join('; ');
+      setErrorMsg(
+        indexed.length > 0
+          ? `Indexed ${indexed.length} paper(s), but ${failed.length} failed — ${failDetails}`
+          : `Failed to process PDF(s): ${failDetails}`
+      );
+    }
+
+    if (indexed.length > 0) {
+      setSuccessCount(indexed.length);
+      if (onUploadSuccess) onUploadSuccess();
+      if (failed.length === 0) {
+        setTimeout(() => {
+          setFiles([]);
+          setJobStatuses([]);
+          setIsUploading(false);
+          onClose();
+        }, 1000);
+        return;
+      }
+    }
+    setIsUploading(false);
+  };
+
+  const startPolling = (paperIds) => {
+    stopPolling();
+    pollTimerRef.current = setInterval(async () => {
+      try {
+        const statusRes = await papersApi.getIngestionStatus(paperIds);
+        const current = Array.isArray(statusRes.data) ? statusRes.data : [];
+        setJobStatuses(current);
+
+        const stillRunning = current.some(
+          p => p.status === 'pending' || p.status === 'processing'
+        );
+        if (!stillRunning && current.length > 0) {
+          stopPolling();
+          finalizeStatuses(current);
+        }
+      } catch (pollErr) {
+        console.error("Status polling error:", pollErr);
+      }
+    }, 2000);
+  };
+
   const handleUpload = async () => {
     if (files.length === 0 || !selectedProject) return;
     setIsUploading(true);
     setErrorMsg('');
     setSuccessCount(0);
+    setJobStatuses([]);
 
     const formData = new FormData();
     formData.append('project_id', selectedProject.id);
@@ -34,36 +106,20 @@ export default function UploadModal({ isOpen, onClose, onUploadSuccess }) {
 
     try {
       const res = await papersApi.upload(selectedProject.id, formData);
-      const uploaded = Array.isArray(res.data) ? res.data : [];
-      const indexed = uploaded.filter(p => p.status === 'indexed');
-      const failed = uploaded.filter(p => p.status === 'failed');
+      const queued = Array.isArray(res.data) ? res.data : [];
+      setJobStatuses(queued);
 
-      if (failed.length > 0) {
-        const failDetails = failed
-          .map(p => `${p.file_name}: ${p.error_message || 'Processing failed'}`)
-          .join('; ');
-        setErrorMsg(
-          indexed.length > 0
-            ? `Indexed ${indexed.length} paper(s), but ${failed.length} failed — ${failDetails}`
-            : `Failed to process PDF(s): ${failDetails}`
-        );
-      }
-
-      if (indexed.length > 0) {
-        setSuccessCount(indexed.length);
-        setTimeout(() => {
-          setFiles([]);
-          setIsUploading(false);
-          if (failed.length === 0) {
-            onClose();
-          }
-          if (onUploadSuccess) onUploadSuccess();
-        }, 1200);
+      const stillRunning = queued.some(
+        p => p.status === 'pending' || p.status === 'processing'
+      );
+      if (stillRunning) {
+        startPolling(queued.map(p => p.id));
       } else {
-        setIsUploading(false);
+        finalizeStatuses(queued);
       }
     } catch (err) {
       console.error("Upload error:", err);
+      stopPolling();
       const status = err.response?.status;
       const detail = err.response?.data?.detail;
       let message = "Failed to upload papers.";
@@ -73,7 +129,7 @@ export default function UploadModal({ isOpen, onClose, onUploadSuccess }) {
       } else if (Array.isArray(detail) && detail.length > 0) {
         message = detail.map(d => d.msg || JSON.stringify(d)).join('; ');
       } else if (status === 502 || status === 504) {
-        message = `Server unavailable or timed out (HTTP ${status}) while processing PDFs. Try uploading fewer or smaller files.`;
+        message = `Server unavailable or timed out (HTTP ${status}) while receiving PDFs.`;
       } else if (status === 413) {
         message = "Uploaded PDF file(s) exceed the server size limit.";
       } else if (status === 401) {
@@ -87,8 +143,37 @@ export default function UploadModal({ isOpen, onClose, onUploadSuccess }) {
     }
   };
 
+  const renderStatusBadge = (status) => {
+    if (status === 'indexed') {
+      return (
+        <span className="inline-flex items-center gap-1 text-[10px] font-semibold px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-500">
+          <CheckCircle2 className="w-3 h-3" /> Indexed
+        </span>
+      );
+    }
+    if (status === 'failed') {
+      return (
+        <span className="inline-flex items-center gap-1 text-[10px] font-semibold px-2 py-0.5 rounded-full bg-rose-500/15 text-rose-500">
+          <AlertCircle className="w-3 h-3" /> Failed
+        </span>
+      );
+    }
+    if (status === 'processing') {
+      return (
+        <span className="inline-flex items-center gap-1 text-[10px] font-semibold px-2 py-0.5 rounded-full bg-academic-500/15 text-academic-500">
+          <Loader2 className="w-3 h-3 animate-spin" /> Processing...
+        </span>
+      );
+    }
+    return (
+      <span className="inline-flex items-center gap-1 text-[10px] font-semibold px-2 py-0.5 rounded-full bg-amber-500/15 text-amber-500">
+        <Clock className="w-3 h-3" /> Pending
+      </span>
+    );
+  };
+
   return (
-    <Modal isOpen={isOpen} onClose={onClose} title="Upload Academic Research Papers (PDF)">
+    <Modal isOpen={isOpen} onClose={handleClose} title="Upload Academic Research Papers (PDF)">
       <div className="space-y-4">
         {selectedProject && (
           <p className="text-xs text-slate-500">
@@ -103,7 +188,7 @@ export default function UploadModal({ isOpen, onClose, onUploadSuccess }) {
             Click to browse or drop research papers
           </span>
           <span className="text-[11px] text-slate-400 mt-1">
-            Accepts multiple PDF files (auto text extraction, chunking, and ChromaDB vector indexing)
+            Accepts multiple PDF files (background text extraction, Gemini embeddings, and pgvector indexing)
           </span>
           <input
             type="file"
@@ -116,7 +201,7 @@ export default function UploadModal({ isOpen, onClose, onUploadSuccess }) {
         </label>
 
         {/* File Queue */}
-        {files.length > 0 && (
+        {files.length > 0 && jobStatuses.length === 0 && (
           <div className="space-y-2">
             <span className="text-xs font-bold uppercase tracking-wider text-slate-500">
               Files to Index ({files.length})
@@ -143,6 +228,28 @@ export default function UploadModal({ isOpen, onClose, onUploadSuccess }) {
           </div>
         )}
 
+        {/* Live Background Ingestion Progress */}
+        {jobStatuses.length > 0 && (
+          <div className="space-y-2">
+            <span className="text-xs font-bold uppercase tracking-wider text-slate-500">
+              Ingestion Status ({jobStatuses.length})
+            </span>
+            <div className="max-h-44 overflow-y-auto space-y-1.5 divide-y divide-slate-100 dark:divide-slate-800">
+              {jobStatuses.map((job) => (
+                <div key={job.id} className="flex items-center justify-between py-1.5 text-xs gap-2">
+                  <div className="flex items-center gap-2 truncate">
+                    <FileText className="w-4 h-4 text-academic-500 shrink-0" />
+                    <span className="truncate text-slate-800 dark:text-slate-200 font-medium">
+                      {job.file_name}
+                    </span>
+                  </div>
+                  {renderStatusBadge(job.status)}
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
         {errorMsg && (
           <div className="p-3 bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-900 rounded-lg text-xs text-rose-600 flex items-center gap-2">
             <AlertCircle className="w-4 h-4 shrink-0" />
@@ -153,17 +260,16 @@ export default function UploadModal({ isOpen, onClose, onUploadSuccess }) {
         {successCount > 0 && (
           <div className="p-3 bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-900 rounded-lg text-xs text-emerald-600 flex items-center gap-2">
             <CheckCircle2 className="w-4 h-4 shrink-0" />
-            <span>Successfully indexed {successCount} research papers!</span>
+            <span>Successfully indexed {successCount} research paper(s)!</span>
           </div>
         )}
 
         <div className="flex justify-end gap-2 pt-2">
           <button
-            onClick={onClose}
-            disabled={isUploading}
+            onClick={handleClose}
             className="academic-button-secondary text-xs"
           >
-            Cancel
+            {isUploading ? 'Run in Background' : 'Cancel'}
           </button>
           <button
             onClick={handleUpload}
@@ -173,7 +279,7 @@ export default function UploadModal({ isOpen, onClose, onUploadSuccess }) {
             {isUploading ? (
               <>
                 <Loader2 className="w-4 h-4 animate-spin" />
-                <span>Processing & Indexing Embeddings...</span>
+                <span>Indexing in Background...</span>
               </>
             ) : (
               <span>Start Ingestion ({files.length} Papers)</span>

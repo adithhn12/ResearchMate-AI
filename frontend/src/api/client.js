@@ -63,7 +63,13 @@ export const projectsApi = {
 export const papersApi = {
   upload: (projectId, formData) => apiClient.post('/papers/upload', formData, {
     headers: { 'Content-Type': 'multipart/form-data' },
+    timeout: 120000,
   }),
+  getIngestionStatus: (paperIds) => {
+    const params = new URLSearchParams();
+    paperIds.forEach((id) => params.append('paper_ids', id));
+    return apiClient.get(`/papers/status?${params.toString()}`);
+  },
   listByProject: (projectId, params = {}) => apiClient.get(`/papers/project/${projectId}`, { params }),
   get: (id) => apiClient.get(`/papers/${id}`),
   delete: (id) => apiClient.delete(`/papers/${id}`),

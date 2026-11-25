@@ -99,17 +99,26 @@ def test_multi_pdf_upload_rag_citations_and_temp_cleanup():
             ],
             headers=headers,
         )
-        assert upload_resp.status_code == 200, upload_resp.text
+        assert upload_resp.status_code == 202, upload_resp.text
         papers = upload_resp.json()
         assert len(papers) == 2
-        assert all(p["status"] == "indexed" for p in papers)
-        assert all(p["page_count"] == 2 for p in papers)
+        paper_ids = [p["id"] for p in papers]
+
+        # Poll ingestion status endpoint
+        status_resp = client.get(
+            "/api/v1/papers/status",
+            params=[("paper_ids", pid) for pid in paper_ids],
+            headers=headers,
+        )
+        assert status_resp.status_code == 200
+        polled = status_resp.json()
+        assert len(polled) == 2
+        assert all(p["status"] == "indexed" for p in polled)
+        assert all(p["page_count"] == 2 for p in polled)
 
         # Verify temp files were cleaned up reliably
         temp_files_after = set(os.listdir(settings.UPLOAD_DIR)) if os.path.exists(settings.UPLOAD_DIR) else set()
         assert temp_files_after == temp_files_before
-
-        paper_ids = [p["id"] for p in papers]
 
         # Verify chunk metadata persisted
         with SessionLocal() as db:
@@ -260,9 +269,11 @@ def test_postgresql_sanitized_chunk_insertion_and_idempotent_retry(monkeypatch):
             files=[("files", ("nul_test_paper.pdf", io.BytesIO(pdf_bytes), "application/pdf"))],
             headers=headers,
         )
-        assert r1.status_code == 200, r1.text
+        assert r1.status_code == 202, r1.text
         p1 = r1.json()[0]
-        assert p1["status"] == "indexed"
+        status_r1 = client.get("/api/v1/papers/status", params=[("paper_ids", p1["id"])], headers=headers)
+        assert status_r1.status_code == 200
+        assert status_r1.json()[0]["status"] == "indexed"
 
         # Defensive check: insert chunk containing raw \x00 directly through vector_store
         with SessionLocal() as db:
@@ -298,7 +309,7 @@ def test_postgresql_sanitized_chunk_insertion_and_idempotent_retry(monkeypatch):
             files=[("files", ("nul_test_paper.pdf", io.BytesIO(pdf_bytes), "application/pdf"))],
             headers=headers,
         )
-        assert r2.status_code == 200, r2.text
+        assert r2.status_code == 202, r2.text
         p2 = r2.json()[0]
         assert p2["id"] == p1["id"]
 
@@ -309,5 +320,116 @@ def test_postgresql_sanitized_chunk_insertion_and_idempotent_retry(monkeypatch):
                 .count()
             )
             assert paper_count == 1
+    finally:
+        client.delete(f"/api/v1/projects/{project_id}", headers=headers)
+
+
+def test_upload_returns_promptly_and_prevents_duplicate_concurrent_ingestion(monkeypatch):
+    """
+    Verify /papers/upload returns HTTP 202 promptly with status='pending',
+    and duplicate uploads while pending/processing do not queue duplicate jobs.
+    """
+    from fastapi import BackgroundTasks
+    queued_calls = []
+
+    def _capture_add_task(self, func, *args, **kwargs):
+        queued_calls.append((func, args, kwargs))
+
+    monkeypatch.setattr(BackgroundTasks, "add_task", _capture_add_task)
+
+    headers = _get_auth_headers()
+    proj_resp = client.post(
+        "/api/v1/projects",
+        json={"name": "Prompt Upload & Dedup Test", "description": "Verify async queue & dedup"},
+        headers=headers,
+    )
+    assert proj_resp.status_code == 200
+    project_id = proj_resp.json()["id"]
+    pdf_bytes = _make_pdf_bytes("Concurrent Test Paper", ["Page 1 content for background queue."])
+
+    try:
+        # 1. First upload queues 1 background job and returns immediately with status='pending'
+        r1 = client.post(
+            "/api/v1/papers/upload",
+            data={"project_id": str(project_id)},
+            files=[("files", ("concurrent.pdf", io.BytesIO(pdf_bytes), "application/pdf"))],
+            headers=headers,
+        )
+        assert r1.status_code == 202
+        p1 = r1.json()[0]
+        assert p1["status"] == "pending"
+        assert len(queued_calls) == 1
+
+        # 2. Duplicate upload while still pending must NOT queue a second background job
+        r2 = client.post(
+            "/api/v1/papers/upload",
+            data={"project_id": str(project_id)},
+            files=[("files", ("concurrent.pdf", io.BytesIO(pdf_bytes), "application/pdf"))],
+            headers=headers,
+        )
+        assert r2.status_code == 202
+        assert r2.json()[0]["id"] == p1["id"]
+        assert r2.json()[0]["status"] == "pending"
+        assert len(queued_calls) == 1  # No duplicate job queued!
+
+        # 3. Clean up any captured temp file from mocked add_task
+        for _, args, _ in queued_calls:
+            for job in args[0]:
+                tp = job.get("temp_path")
+                if tp and os.path.exists(tp):
+                    os.remove(tp)
+    finally:
+        client.delete(f"/api/v1/projects/{project_id}", headers=headers)
+
+
+def test_background_ingestion_failure_and_retry(monkeypatch):
+    """Verify failed background ingestion sets status='failed' with error_message, and retry succeeds."""
+    headers = _get_auth_headers()
+    proj_resp = client.post(
+        "/api/v1/projects",
+        json={"name": "BG Failure & Retry Test", "description": "Verify failed status and retry"},
+        headers=headers,
+    )
+    assert proj_resp.status_code == 200
+    project_id = proj_resp.json()["id"]
+    pdf_bytes = _make_pdf_bytes("Retryable Paper", ["Abstract: Resilient background PDF ingestion."])
+
+    orig_extract = PDFService.extract_all
+
+    def _fail_once(file_path, file_name):
+        raise RuntimeError("Simulated transient parsing failure")
+
+    try:
+        # 1. Simulate failure in background task
+        monkeypatch.setattr(PDFService, "extract_all", staticmethod(_fail_once))
+        r1 = client.post(
+            "/api/v1/papers/upload",
+            data={"project_id": str(project_id)},
+            files=[("files", ("retry_me.pdf", io.BytesIO(pdf_bytes), "application/pdf"))],
+            headers=headers,
+        )
+        assert r1.status_code == 202
+        paper_id = r1.json()[0]["id"]
+
+        s1 = client.get("/api/v1/papers/status", params=[("paper_ids", paper_id)], headers=headers)
+        assert s1.status_code == 200
+        assert s1.json()[0]["status"] == "failed"
+        assert "Simulated transient parsing failure" in (s1.json()[0]["error_message"] or "")
+
+        # 2. Restore extract_all and retry the same PDF -> must succeed and reuse same paper_id
+        monkeypatch.setattr(PDFService, "extract_all", staticmethod(orig_extract))
+        r2 = client.post(
+            "/api/v1/papers/upload",
+            data={"project_id": str(project_id)},
+            files=[("files", ("retry_me.pdf", io.BytesIO(pdf_bytes), "application/pdf"))],
+            headers=headers,
+        )
+        assert r2.status_code == 202
+        assert r2.json()[0]["id"] == paper_id
+
+        s2 = client.get("/api/v1/papers/status", params=[("paper_ids", paper_id)], headers=headers)
+        assert s2.status_code == 200
+        assert s2.json()[0]["status"] == "indexed"
+        assert s2.json()[0]["error_message"] is None
     finally:
         client.delete(f"/api/v1/projects/{project_id}", headers=headers)
