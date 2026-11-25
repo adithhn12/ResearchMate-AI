@@ -6,6 +6,7 @@ from app.models import User, Project, Paper, ActivityLog
 from app.schemas import ProjectCreate, ProjectUpdate, ProjectResponse
 from app.auth import get_current_user
 from app.services.vector_store import vector_store
+from app.services.storage_service import storage_service
 
 router = APIRouter(prefix="/projects", tags=["Research Projects"])
 
@@ -71,8 +72,14 @@ def delete_project(project_id: int, db: Session = Depends(get_db), current_user:
     if not proj:
         raise HTTPException(status_code=404, detail="Project not found")
     
-    # Delete vector store collection
-    vector_store.delete_project_collection(project_id)
+    # Delete stored PDFs in Supabase Storage
+    for paper in proj.papers:
+        remote_key = paper.storage_path or paper.file_path
+        if remote_key:
+            storage_service.delete_pdf(remote_key)
+
+    # Delete vector store chunks for project
+    vector_store.delete_project_collection(project_id, db=db)
 
     # Clear project reference on activity logs to satisfy foreign key constraints
     db.query(ActivityLog).filter(ActivityLog.project_id == project_id).update(

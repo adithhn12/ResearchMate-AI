@@ -1,9 +1,9 @@
 import os
+import tempfile
 from pathlib import Path
 from dotenv import load_dotenv
 
 # Find root directory (where .env is located)
-# Base directories
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
 ROOT_ENV = BASE_DIR / ".env"
 
@@ -12,61 +12,59 @@ if ROOT_ENV.exists():
 else:
     load_dotenv()
 
-# Production persistent disk directory (e.g., Render disk mounted at /var/data)
-DATA_DIR_ENV = os.getenv("DATA_DIR")
-if DATA_DIR_ENV:
-    try:
-        p = Path(DATA_DIR_ENV)
-        p.mkdir(parents=True, exist_ok=True)
-        # Test write permission
-        test_file = p / ".write_test"
-        test_file.touch()
-        test_file.unlink()
-        STORAGE_ROOT = p
-    except Exception:
-        # Fallback to local BASE_DIR if persistent mount path is inaccessible
-        STORAGE_ROOT = BASE_DIR
-else:
-    STORAGE_ROOT = BASE_DIR
+# Temporary local directory only (uploaded PDFs are persisted in Supabase Storage)
+TEMP_UPLOAD_DIR = Path(tempfile.gettempdir()) / "researchmate_uploads"
+TEMP_UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+
 
 class Settings:
     PROJECT_NAME: str = "ResearchMate AI"
     VERSION: str = "1.0.0"
     API_V1_STR: str = "/api/v1"
-    
+
     # Security
     SECRET_KEY: str = os.getenv("SECRET_KEY") or "researchmate-ai-super-secret-key-change-in-prod-2026"
     ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24 * 7  # 7 days
-    
+
     # CORS Origins (comma-separated or * for wildcard)
     CORS_ORIGINS_RAW: str = os.getenv("CORS_ORIGINS") or "*"
+
     @property
     def CORS_ORIGINS(self):
         if self.CORS_ORIGINS_RAW.strip() == "*":
             return ["*"]
         return [o.strip() for o in self.CORS_ORIGINS_RAW.split(",") if o.strip()]
-    
-    # Gemini API
+
+    # Gemini API (LLM + External Embeddings)
     GEMINI_API_KEY: str = os.getenv("GEMINI_API_KEY", "")
-    # Default model: gemini-flash-lite-latest (fastest & high quota, with fallbacks to gemini-3.8-flash, gemini-flash-latest)
     GEMINI_MODEL: str = os.getenv("GEMINI_MODEL", "gemini-flash-lite-latest")
-    
-    # Storage & DB (persistent across deployments when DATA_DIR is configured)
-    _RAW_DATABASE_URL: str = os.getenv("DATABASE_URL") or f"sqlite:///{STORAGE_ROOT / 'researchmate.db'}"
+    EMBEDDING_MODEL_NAME: str = os.getenv("EMBEDDING_MODEL_NAME", "gemini-embedding-001")
+    EMBEDDING_DIMENSIONS: int = int(os.getenv("EMBEDDING_DIMENSIONS", "768"))
+    EMBEDDING_BATCH_SIZE: int = int(os.getenv("EMBEDDING_BATCH_SIZE", "16"))
+
+    # Database (Supabase PostgreSQL in production; local SQLite fallback for tests if unset)
+    _RAW_DATABASE_URL: str = os.getenv("DATABASE_URL") or f"sqlite:///{BASE_DIR / 'researchmate.db'}"
     DATABASE_URL: str = (
         _RAW_DATABASE_URL.replace("postgres://", "postgresql://", 1)
         if _RAW_DATABASE_URL.startswith("postgres://")
         else _RAW_DATABASE_URL
     )
-    CHROMA_PERSIST_DIR: str = os.getenv("CHROMA_PERSIST_DIR", str(STORAGE_ROOT / "chroma_data"))
-    UPLOAD_DIR: str = os.getenv("UPLOAD_DIR", str(STORAGE_ROOT / "uploaded_papers"))
-    
-    # Embedding model
-    EMBEDDING_MODEL_NAME: str = os.getenv("EMBEDDING_MODEL_NAME", "all-MiniLM-L6-v2")
+
+    # Supabase Storage (for uploaded PDFs)
+    SUPABASE_URL: str = os.getenv("SUPABASE_URL", "").strip().rstrip("/")
+    SUPABASE_SERVICE_ROLE_KEY: str = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "").strip()
+    SUPABASE_STORAGE_BUCKET: str = os.getenv("SUPABASE_STORAGE_BUCKET", "research-papers").strip()
+
+    # Temporary filesystem directory on Render (cleaned up immediately after processing)
+    UPLOAD_DIR: str = os.getenv("UPLOAD_DIR", str(TEMP_UPLOAD_DIR))
+
+    # Bounded ingestion limits for 512 MB Render Free Tier
+    MAX_UPLOAD_FILE_MB: int = int(os.getenv("MAX_UPLOAD_FILE_MB", "25"))
+    MAX_PDF_PAGES: int = int(os.getenv("MAX_PDF_PAGES", "150"))
+    MAX_FILES_PER_UPLOAD: int = int(os.getenv("MAX_FILES_PER_UPLOAD", "5"))
+
 
 settings = Settings()
 
-# Ensure storage directories exist
-os.makedirs(settings.CHROMA_PERSIST_DIR, exist_ok=True)
 os.makedirs(settings.UPLOAD_DIR, exist_ok=True)

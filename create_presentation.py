@@ -518,107 +518,125 @@ def build_presentation():
     )
 
     # =========================================================================
-    # SLIDE 5: END-TO-END WORKFLOW (New Slide)
+    # SLIDE 5: END-TO-END WORKFLOW (Diagrammatic Serpentine Flowchart with Arrows)
     # =========================================================================
     s5 = prs.slides.add_slide(blank_layout)
     set_bg(s5)
     add_header(s5, "End-to-End System Workflow: User & Data Pipeline", "System Workflow", "05 / 12")
 
+    # Serpentine 3x2 flowchart:
+    # Top row (L -> R): 01 -> 02 -> 03
+    # Turn (Down):      03 -> 04
+    # Bottom row (R -> L): 04 -> 05 -> 06
     workflow_stages = [
         (
-            "01 • AUTH & PROJECT",
-            "Workspace Initialization",
+            "01",
+            "AUTH & PROJECT",
+            "Workspace Setup",
             [
-                "Sign in via JWT or Demo Login",
-                "Create isolated research project",
-                "Binds dedicated ChromaDB collection"
+                "JWT or Demo Login auth",
+                "Create isolated project",
+                "Dedicated Chroma collection"
             ],
             C_SKY,
-            Inches(0.8), Inches(1.6)
+            Inches(0.75), Inches(1.62)
         ),
         (
-            "02 • MULTI-PDF UPLOAD",
+            "02",
+            "MULTI-PDF UPLOAD",
             "Ingestion & Validation",
             [
-                "Upload multiple PDFs in UploadModal",
-                "Validate .pdf & %PDF- magic header",
-                "Stream files to disk safely"
+                "Multi-file PDF upload",
+                "Check .pdf & %PDF- header",
+                "Stream files safely to disk"
             ],
             C_BLUE,
-            Inches(4.8), Inches(1.6)
+            Inches(4.84), Inches(1.62)
         ),
         (
-            "03 • PARSE & CHUNK",
-            "PyMuPDF + Gemini Metadata",
+            "03",
+            "PARSE & CHUNK",
+            "PyMuPDF + Gemini Meta",
             [
-                "Single-pass page & text extraction",
-                "Extract & refine title, authors, year",
-                "Split into 180-word chunks (35 overlap)"
+                "Single-pass text extraction",
+                "Refine title, authors & year",
+                "180-word chunks (35 overlap)"
             ],
             C_INDIGO,
-            Inches(8.8), Inches(1.6)
+            Inches(8.93), Inches(1.62)
         ),
         (
-            "04 • VECTOR INDEXING",
-            "Singleton ONNX + ChromaDB",
+            "04",
+            "VECTOR INDEXING",
+            "Singleton ONNX + Chroma",
             [
-                "Singleton all-MiniLM-L6-v2 embeds batches",
-                "Upsert 384-d vectors in batches of 16",
-                "Persist chunks in SQLite & ChromaDB"
+                "Singleton MiniLM embeds",
+                "384-d vectors (batches of 16)",
+                "Persist SQLite + ChromaDB"
             ],
             C_EMERALD,
-            Inches(0.8), Inches(4.05)
+            Inches(8.93), Inches(4.38)
         ),
         (
-            "05 • GROUNDED RAG Q&A",
+            "05",
+            "GROUNDED RAG Q&A",
             "Scoped Inquiry & Citations",
             [
-                "Select all or specific indexed papers",
-                "Per-paper diversity retrieval (per_paper_k)",
-                "Gemini answers with clickable [p. X] pills"
+                "Select all or target papers",
+                "Per-paper diversity search",
+                "Gemini + clickable [p. X] pills"
             ],
             C_AMBER,
-            Inches(4.8), Inches(4.05)
+            Inches(4.84), Inches(4.38)
         ),
         (
-            "06 • MATRIX & ANALYTICS",
+            "06",
+            "MATRIX & ANALYTICS",
             "Synthesis & Visualization",
             [
-                "Select 2+ papers for 9-axis comparison",
-                "Generate structured methodology table",
-                "View Recharts trends on Dashboard"
+                "9-axis paper comparison",
+                "Side-by-side table synthesis",
+                "Recharts dashboard trends"
             ],
             C_ROSE,
-            Inches(8.8), Inches(4.05)
+            Inches(0.75), Inches(4.38)
         )
     ]
 
-    for st_tag, st_title, st_bullets, col, x, y in workflow_stages:
-        w, h = Inches(3.7), Inches(2.2)
-        add_card(s5, x, y, w, h, C_CARD, C_BORDER)
+    box_w = Inches(3.35)
+    box_h = Inches(2.05)
 
-        bar = s5.shapes.add_shape(MSO_SHAPE.RECTANGLE, x, y, w, Inches(0.08))
-        bar.fill.solid()
-        bar.fill.fore_color.rgb = col
-        bar.line.fill.background()
+    for num, st_tag, st_title, st_bullets, col, x, y in workflow_stages:
+        add_card(s5, x, y, box_w, box_h, C_CARD, col)
 
-        tb = s5.shapes.add_textbox(x + Inches(0.18), y + Inches(0.14), w - Inches(0.36), h - Inches(0.24))
+        # Colored top header strip inside node
+        hdr = s5.shapes.add_shape(MSO_SHAPE.RECTANGLE, x, y, box_w, Inches(0.42))
+        hdr.fill.solid()
+        hdr.fill.fore_color.rgb = col
+        hdr.line.fill.background()
+
+        # Step number pill + stage label in header
+        tb_h = s5.shapes.add_textbox(x + Inches(0.12), y + Inches(0.06), box_w - Inches(0.24), Inches(0.3))
+        tf_h = tb_h.text_frame
+        tf_h.margin_left = tf_h.margin_right = tf_h.margin_top = tf_h.margin_bottom = 0
+        p_h = tf_h.paragraphs[0]
+        r_h = p_h.add_run()
+        r_h.text = f"STEP {num}  •  {st_tag}"
+        r_h.font.size = Pt(10)
+        r_h.font.bold = True
+        r_h.font.color.rgb = C_BG
+        r_h.font.name = "Segoe UI"
+
+        # Node title & bullets
+        tb = s5.shapes.add_textbox(x + Inches(0.15), y + Inches(0.48), box_w - Inches(0.3), box_h - Inches(0.55))
         tf = tb.text_frame
         tf.word_wrap = True
+        tf.margin_left = tf.margin_right = tf.margin_top = tf.margin_bottom = 0
 
-        p1 = tf.paragraphs[0]
-        r1 = p1.add_run()
-        r1.text = st_tag
-        r1.font.size = Pt(9.5)
-        r1.font.bold = True
-        r1.font.color.rgb = col
-        r1.font.name = "Segoe UI"
-
-        p2 = tf.add_paragraph()
-        p2.space_before = Pt(2)
+        p2 = tf.paragraphs[0]
         r2 = p2.add_run()
         r2.text = st_title
-        r2.font.size = Pt(12)
+        r2.font.size = Pt(11.5)
         r2.font.bold = True
         r2.font.color.rgb = C_TEXT_WHITE
         r2.font.name = "Segoe UI"
@@ -627,7 +645,7 @@ def build_presentation():
             p = tf.add_paragraph()
             p.space_before = Pt(4)
             r_dot = p.add_run()
-            r_dot.text = "• "
+            r_dot.text = "▸ "
             r_dot.font.bold = True
             r_dot.font.size = Pt(10)
             r_dot.font.color.rgb = col
@@ -638,22 +656,41 @@ def build_presentation():
             r_txt.font.color.rgb = C_TEXT_LIGHT
             r_txt.font.name = "Segoe UI"
 
+    # Directional Arrow Connectors between workflow nodes
+    arrows = [
+        # Top row: 01 -> 02, 02 -> 03
+        (MSO_SHAPE.RIGHT_ARROW, Inches(4.22), Inches(2.47), Inches(0.50), Inches(0.36), C_SKY),
+        (MSO_SHAPE.RIGHT_ARROW, Inches(8.31), Inches(2.47), Inches(0.50), Inches(0.36), C_INDIGO),
+        # Turn down: 03 -> 04
+        (MSO_SHAPE.DOWN_ARROW, Inches(10.41), Inches(3.80), Inches(0.38), Inches(0.46), C_EMERALD),
+        # Bottom row: 04 -> 05, 05 -> 06
+        (MSO_SHAPE.LEFT_ARROW, Inches(8.31), Inches(5.23), Inches(0.50), Inches(0.36), C_AMBER),
+        (MSO_SHAPE.LEFT_ARROW, Inches(4.22), Inches(5.23), Inches(0.50), Inches(0.36), C_ROSE),
+    ]
+
+    for shape_type, ax, ay, aw, ah, acol in arrows:
+        arr = s5.shapes.add_shape(shape_type, ax, ay, aw, ah)
+        arr.fill.solid()
+        arr.fill.fore_color.rgb = acol
+        arr.line.fill.background()
+
     # Bottom Workflow Summary Banner
-    add_card(s5, Inches(0.8), Inches(6.42), Inches(11.7), Inches(0.6), C_CARD_LIGHT, C_BORDER_ACCENT)
-    tb_wf = s5.shapes.add_textbox(Inches(1.0), Inches(6.5), Inches(11.3), Inches(0.45))
+    add_card(s5, Inches(0.75), Inches(6.62), Inches(11.53), Inches(0.48), C_CARD_LIGHT, C_BORDER_ACCENT)
+    tb_wf = s5.shapes.add_textbox(Inches(0.95), Inches(6.70), Inches(11.13), Inches(0.32))
     tf_wf = tb_wf.text_frame
     tf_wf.word_wrap = True
+    tf_wf.margin_left = tf_wf.margin_right = tf_wf.margin_top = tf_wf.margin_bottom = 0
     p_wf = tf_wf.paragraphs[0]
     p_wf.alignment = PP_ALIGN.CENTER
     r_wf1 = p_wf.add_run()
-    r_wf1.text = "END-TO-END FLOW:  "
+    r_wf1.text = "PIPELINE FLOW:  "
     r_wf1.font.size = Pt(10)
     r_wf1.font.bold = True
     r_wf1.font.color.rgb = C_SKY
     r_wf1.font.name = "Segoe UI"
 
     r_wf2 = p_wf.add_run()
-    r_wf2.text = "Login → Create Project → Upload PDFs → PyMuPDF Parse → ONNX Embed & ChromaDB Index → Multi-Doc RAG Q&A → 9-Axis Matrix"
+    r_wf2.text = "01 Auth & Project  →  02 Upload PDFs  →  03 PyMuPDF Parse  →  04 ONNX & ChromaDB  →  05 Grounded RAG  →  06 9-Axis Matrix"
     r_wf2.font.size = Pt(10)
     r_wf2.font.color.rgb = C_TEXT_LIGHT
     r_wf2.font.name = "Segoe UI"

@@ -16,11 +16,9 @@ logger = logging.getLogger("researchmate.app")
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from fastapi.staticfiles import StaticFiles
 from sqlalchemy import text
 from app.config import settings
-from app.database import engine, Base, SessionLocal
-from app.services.vector_store import vector_store
+from app.database import init_db, SessionLocal
 from app.routers import (
     auth,
     projects,
@@ -32,8 +30,8 @@ from app.routers import (
     analytics
 )
 
-# Initialize database tables
-Base.metadata.create_all(bind=engine)
+# Initialize database tables and pgvector extension/indexes idempotently
+init_db()
 
 app = FastAPI(
     title=settings.PROJECT_NAME,
@@ -79,10 +77,6 @@ app.include_router(research_gaps.router, prefix=settings.API_V1_STR)
 app.include_router(literature_reviews.router, prefix=settings.API_V1_STR)
 app.include_router(analytics.router, prefix=settings.API_V1_STR)
 
-# Static files for uploaded PDFs if needed
-if os.path.exists(settings.UPLOAD_DIR):
-    app.mount("/uploads", StaticFiles(directory=settings.UPLOAD_DIR), name="uploads")
-
 @app.get("/")
 def root():
     return {
@@ -112,11 +106,6 @@ def health():
 
 @app.on_event("startup")
 def log_startup_routes():
-    try:
-        vector_store.warmup_if_cached()
-    except Exception as e:
-        logger.warning(f"Embedding warmup skipped: {e}")
-
     logger.info("=" * 60)
     logger.info(f"ResearchMate AI Backend Online (v{settings.VERSION})")
     logger.info(f"API V1 Prefix: {settings.API_V1_STR}")

@@ -1,8 +1,14 @@
 import io
+import os
+import sys
+import pytest
 import pymupdf as fitz
 from fastapi.testclient import TestClient
+from app.config import settings
+from app.database import SessionLocal
 from app.main import app
-from app.services import vector_store as vs_module
+from app.models import PaperChunk
+from app.services.embedding_service import embedding_service
 from app.services.vector_store import vector_store
 
 client = TestClient(app)
@@ -26,25 +32,35 @@ def _get_auth_headers():
     return {"Authorization": f"Bearer {token}"}
 
 
-def test_singleton_embedding_session_reused():
-    """Verify ONNX InferenceSession and Tokenizer are initialized only once across calls."""
-    ef = vector_store.embedding_fn
-    e1 = ef(["Transformer self-attention mechanism for sequence modeling."])
-    sess_id_1 = id(vs_module._ONNX_SESSION)
-    tok_id_1 = id(vs_module._TOKENIZER)
-
-    e2 = ef(["Retrieval augmented generation improves factual grounding."])
-    sess_id_2 = id(vs_module._ONNX_SESSION)
-    tok_id_2 = id(vs_module._TOKENIZER)
-
-    assert len(e1) == 1 and len(e1[0]) == 384
-    assert len(e2) == 1 and len(e2[0]) == 384
-    assert sess_id_1 == sess_id_2
-    assert tok_id_1 == tok_id_2
+def test_no_local_embedding_models_loaded():
+    """Verify local ONNX Runtime, Sentence Transformers, PyTorch, and ChromaDB are never loaded."""
+    forbidden_modules = ("onnxruntime", "sentence_transformers", "chromadb", "torch")
+    loaded = [m for m in forbidden_modules if m in sys.modules]
+    assert loaded == [], f"Unexpected local ML/vector modules loaded: {loaded}"
 
 
-def test_multi_pdf_upload_rag_and_citations():
-    """Verify multi-PDF upload, chunking, ChromaDB indexing, RAG diversity, and cleanup."""
+def test_external_embedding_consistency_and_no_local_fallback(monkeypatch):
+    """
+    Verify indexing and querying use the same gemini-embedding-001 model & dimensionality,
+    and missing API key fails explicitly without falling back to local inference.
+    """
+    doc_vecs = embedding_service.embed_documents(["Transformer self-attention mechanism."])
+    query_vec = embedding_service.embed_query("How does self-attention work?")
+
+    assert len(doc_vecs) == 1
+    assert len(doc_vecs[0]) == settings.EMBEDDING_DIMENSIONS
+    assert len(query_vec) == settings.EMBEDDING_DIMENSIONS
+    assert embedding_service.model_name == "gemini-embedding-001"
+
+    # Verify no silent fallback when GEMINI_API_KEY is missing
+    monkeypatch.setattr(settings, "GEMINI_API_KEY", "")
+    monkeypatch.setattr(embedding_service, "_client", None)
+    with pytest.raises(RuntimeError, match="GEMINI_API_KEY"):
+        embedding_service.embed_query("Should fail without local fallback")
+
+
+def test_multi_pdf_upload_rag_citations_and_temp_cleanup():
+    """Verify sequential multi-PDF upload, pgvector indexing, RAG diversity, and temp cleanup."""
     headers = _get_auth_headers()
 
     proj_resp = client.post(
@@ -70,6 +86,8 @@ def test_multi_pdf_upload_rag_and_citations():
         ],
     )
 
+    temp_files_before = set(os.listdir(settings.UPLOAD_DIR)) if os.path.exists(settings.UPLOAD_DIR) else set()
+
     try:
         upload_resp = client.post(
             "/api/v1/papers/upload",
@@ -86,7 +104,18 @@ def test_multi_pdf_upload_rag_and_citations():
         assert all(p["status"] == "indexed" for p in papers)
         assert all(p["page_count"] == 2 for p in papers)
 
+        # Verify temp files were cleaned up reliably
+        temp_files_after = set(os.listdir(settings.UPLOAD_DIR)) if os.path.exists(settings.UPLOAD_DIR) else set()
+        assert temp_files_after == temp_files_before
+
         paper_ids = [p["id"] for p in papers]
+
+        # Verify chunk metadata persisted
+        with SessionLocal() as db:
+            db_chunks = db.query(PaperChunk).filter(PaperChunk.paper_id.in_(paper_ids)).all()
+            assert len(db_chunks) >= 2
+            assert all(c.embedding_model == "gemini-embedding-001" for c in db_chunks)
+            assert all(c.embedding_dimensions == settings.EMBEDDING_DIMENSIONS for c in db_chunks)
 
         # Verify multi-document RAG retrieval preserves paper_id, paper_title, and page_number
         chunks = vector_store.query_chunks(
@@ -106,8 +135,8 @@ def test_multi_pdf_upload_rag_and_citations():
         client.delete(f"/api/v1/projects/{project_id}", headers=headers)
 
 
-def test_upload_error_handling_meaningful_messages():
-    """Verify invalid/corrupt/empty uploads return clear, specific HTTP errors."""
+def test_upload_error_handling_and_limits():
+    """Verify invalid/corrupt/empty uploads and file-count limits return clear HTTP errors."""
     headers = _get_auth_headers()
     proj_resp = client.post(
         "/api/v1/projects",
@@ -147,5 +176,19 @@ def test_upload_error_handling_meaningful_messages():
         )
         assert resp_empty.status_code == 422
         assert "empty (0 bytes)" in resp_empty.json()["detail"]
+
+        # 4. Exceeding MAX_FILES_PER_UPLOAD
+        too_many = [
+            ("files", (f"doc_{i}.pdf", io.BytesIO(b"%PDF-1.4\n"), "application/pdf"))
+            for i in range(settings.MAX_FILES_PER_UPLOAD + 1)
+        ]
+        resp_limit = client.post(
+            "/api/v1/papers/upload",
+            data={"project_id": str(project_id)},
+            files=too_many,
+            headers=headers,
+        )
+        assert resp_limit.status_code == 400
+        assert "Maximum" in resp_limit.json()["detail"]
     finally:
         client.delete(f"/api/v1/projects/{project_id}", headers=headers)

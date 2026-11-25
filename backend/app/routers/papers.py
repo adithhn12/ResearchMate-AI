@@ -2,6 +2,9 @@ import gc
 import logging
 import os
 import shutil
+import tempfile
+import threading
+import uuid
 from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Query
 from sqlalchemy.orm import Session
@@ -13,10 +16,14 @@ from app.auth import get_current_user
 from app.services.pdf_service import PDFService
 from app.services.vector_store import vector_store
 from app.services.gemini_service import gemini_service
+from app.services.storage_service import storage_service
 
 logger = logging.getLogger("researchmate.papers")
 
 router = APIRouter(prefix="/papers", tags=["Research Papers"])
+
+# Limit concurrent PDF ingestion to 1 at a time to protect 512 MB RAM on Render Free Tier
+_INGEST_SEMAPHORE = threading.BoundedSemaphore(1)
 
 
 @router.post("/upload", response_model=List[PaperResponse])
@@ -26,7 +33,6 @@ def upload_papers(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    # Verify project belongs to user
     project = db.query(Project).filter(Project.id == project_id, Project.user_id == current_user.id).first()
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
@@ -41,118 +47,148 @@ def upload_papers(
             detail="Only PDF files (.pdf) are supported. Please select one or more valid PDF documents.",
         )
 
+    if len(pdf_files) > settings.MAX_FILES_PER_UPLOAD:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Maximum {settings.MAX_FILES_PER_UPLOAD} PDF files can be uploaded per request.",
+        )
+
+    acquired = _INGEST_SEMAPHORE.acquire(timeout=30)
+    if not acquired:
+        raise HTTPException(
+            status_code=503,
+            detail="Another document ingestion is currently in progress. Please retry in a few seconds.",
+        )
+
+    max_bytes = settings.MAX_UPLOAD_FILE_MB * 1024 * 1024
     saved_papers: List[Paper] = []
 
-    for file in pdf_files:
-        base_name = os.path.basename(file.filename)
-        safe_filename = f"proj_{project_id}_{base_name}"
-        file_path = os.path.join(settings.UPLOAD_DIR, safe_filename)
+    try:
+        # Process each PDF sequentially so only one PDF is in memory at a time
+        for file in pdf_files:
+            base_name = os.path.basename(file.filename)
+            temp_path = None
+            pages = None
+            chunks = None
 
-        try:
-            with open(file_path, "wb") as buffer:
-                shutil.copyfileobj(file.file, buffer)
-        finally:
             try:
-                file.file.close()
-            except Exception:
-                pass
+                with tempfile.NamedTemporaryFile(
+                    delete=False, suffix=".pdf", dir=settings.UPLOAD_DIR
+                ) as tmp:
+                    temp_path = tmp.name
+                    shutil.copyfileobj(file.file, tmp, length=65536)
+            finally:
+                try:
+                    file.file.close()
+                except Exception:
+                    pass
 
-        file_size = os.path.getsize(file_path)
-
-        # Initial paper record
-        paper = Paper(
-            project_id=project_id,
-            title=os.path.splitext(base_name)[0],
-            file_name=base_name,
-            file_path=file_path,
-            file_size=file_size,
-            status="processing",
-        )
-        db.add(paper)
-        db.commit()
-        db.refresh(paper)
-
-        pages = None
-        chunks = None
-        chunk_objs = None
-
-        try:
-            if file_size == 0:
-                raise ValueError(f"Uploaded file '{base_name}' is empty (0 bytes).")
-
-            with open(file_path, "rb") as pdf_check:
-                header = pdf_check.read(5)
-            if header != b"%PDF-":
-                raise ValueError(f"File '{base_name}' does not have a valid PDF header.")
-
-            # 1. Single-pass PDF text, page count & basic metadata extraction
-            pages, total_pages, basic_meta = PDFService.extract_all(file_path, base_name)
-            paper.page_count = total_pages
-
-            # 2. Refine metadata with Gemini (falls back cleanly to basic_meta)
-            first_pages_text = "\n".join([p["text"] for p in pages[:2]])
-            refined_meta = gemini_service.extract_paper_metadata(first_pages_text, basic_meta)
-
-            paper.title = refined_meta.get("title") or basic_meta["title"]
-            paper.authors = refined_meta.get("authors") or basic_meta["authors"]
-            paper.abstract = refined_meta.get("abstract") or basic_meta["abstract"]
-            paper.publication_year = refined_meta.get("publication_year") or basic_meta["publication_year"]
-            paper.keywords = refined_meta.get("keywords") or basic_meta["keywords"]
-
-            # 3. Token-aligned chunking (180 words fits within all-MiniLM-L6-v2's 256-token limit)
-            chunks = PDFService.chunk_document(pages, chunk_size=180, overlap=35)
-            if not chunks:
-                raise ValueError(f"No indexable text chunks could be extracted from '{base_name}'.")
-
-            # 4. Save chunks to SQLite
-            chunk_objs = [
-                PaperChunk(
-                    paper_id=paper.id,
-                    chunk_index=ch["chunk_index"],
-                    page_number=ch["page_number"],
-                    content=ch["content"],
-                    token_count=ch.get("token_count", 0),
+            file_size = os.path.getsize(temp_path) if temp_path and os.path.exists(temp_path) else 0
+            if file_size > max_bytes:
+                if temp_path and os.path.exists(temp_path):
+                    os.remove(temp_path)
+                raise HTTPException(
+                    status_code=413,
+                    detail=f"File '{base_name}' exceeds the {settings.MAX_UPLOAD_FILE_MB} MB upload limit.",
                 )
-                for ch in chunks
-            ]
-            db.bulk_save_objects(chunk_objs)
 
-            # 5. Index into ChromaDB in small memory-safe batches
-            vector_store.add_paper_chunks(
+            object_key = f"project_{project_id}/{uuid.uuid4().hex}_{base_name}"
+            paper = Paper(
                 project_id=project_id,
-                paper_id=paper.id,
-                paper_title=paper.title,
-                chunks=chunks,
+                title=os.path.splitext(base_name)[0],
+                file_name=base_name,
+                file_path=object_key,
+                storage_path=object_key if storage_service.is_configured() else None,
+                file_size=file_size,
+                status="processing",
             )
-
-            paper.status = "indexed"
+            db.add(paper)
             db.commit()
             db.refresh(paper)
 
-            # Log activity
-            log = ActivityLog(
-                user_id=current_user.id,
-                project_id=project_id,
-                action="upload_paper",
-                details=f"Uploaded and indexed paper '{paper.title}'",
-            )
-            db.add(log)
-            db.commit()
+            try:
+                if file_size == 0:
+                    raise ValueError(f"Uploaded file '{base_name}' is empty (0 bytes).")
 
-        except Exception as e:
-            logger.exception(f"Error processing paper '{base_name}': {e}")
-            db.rollback()
-            paper.status = "failed"
-            paper.error_message = str(e)[:1000]
-            db.commit()
-            db.refresh(paper)
-        finally:
-            del pages, chunks, chunk_objs
-            gc.collect()
+                with open(temp_path, "rb") as pdf_check:
+                    header = pdf_check.read(5)
+                if header != b"%PDF-":
+                    raise ValueError(f"File '{base_name}' does not have a valid PDF header.")
 
-        saved_papers.append(paper)
+                # 1. Single-pass PDF text, page count & basic metadata extraction
+                pages, total_pages, basic_meta = PDFService.extract_all(temp_path, base_name)
+                if total_pages > settings.MAX_PDF_PAGES:
+                    raise ValueError(
+                        f"PDF '{base_name}' has {total_pages} pages, exceeding the {settings.MAX_PDF_PAGES}-page limit."
+                    )
+                paper.page_count = total_pages
 
-    # If every uploaded paper failed, return a meaningful 422 error with the root cause
+                # 2. Refine metadata with Gemini (falls back cleanly to basic_meta)
+                first_pages_text = "\n".join([p["text"] for p in pages[:2]])
+                refined_meta = gemini_service.extract_paper_metadata(first_pages_text, basic_meta)
+
+                paper.title = refined_meta.get("title") or basic_meta["title"]
+                paper.authors = refined_meta.get("authors") or basic_meta["authors"]
+                paper.abstract = refined_meta.get("abstract") or basic_meta["abstract"]
+                paper.publication_year = refined_meta.get("publication_year") or basic_meta["publication_year"]
+                paper.keywords = refined_meta.get("keywords") or basic_meta["keywords"]
+
+                # 3. Bounded chunking (180 words, 35 overlap)
+                chunks = PDFService.chunk_document(pages, chunk_size=180, overlap=35)
+                del pages
+                pages = None
+                if not chunks:
+                    raise ValueError(f"No indexable text chunks could be extracted from '{base_name}'.")
+
+                # 4. Upload PDF to Supabase Storage if configured
+                if storage_service.is_configured():
+                    remote_path = storage_service.upload_pdf(temp_path, object_key)
+                    paper.storage_path = remote_path
+                    paper.file_path = remote_path
+
+                # 5. Generate external Gemini embeddings in bounded batches and store in pgvector
+                vector_store.add_paper_chunks(
+                    project_id=project_id,
+                    paper_id=paper.id,
+                    paper_title=paper.title,
+                    chunks=chunks,
+                    db=db,
+                )
+
+                paper.status = "indexed"
+                db.commit()
+                db.refresh(paper)
+
+                log = ActivityLog(
+                    user_id=current_user.id,
+                    project_id=project_id,
+                    action="upload_paper",
+                    details=f"Uploaded and indexed paper '{paper.title}'",
+                )
+                db.add(log)
+                db.commit()
+
+            except Exception as e:
+                logger.exception(f"Error processing paper '{base_name}': {e}")
+                db.rollback()
+                paper.status = "failed"
+                paper.error_message = str(e)[:1000]
+                db.commit()
+                db.refresh(paper)
+            finally:
+                # Always remove temporary file from Render's ephemeral disk
+                if temp_path and os.path.exists(temp_path):
+                    try:
+                        os.remove(temp_path)
+                    except Exception:
+                        pass
+                del pages, chunks
+                gc.collect()
+
+            saved_papers.append(paper)
+    finally:
+        _INGEST_SEMAPHORE.release()
+
     if saved_papers and all(p.status == "failed" for p in saved_papers):
         error_details = "; ".join(
             f"{p.file_name}: {p.error_message or 'Unknown processing error'}"
@@ -217,16 +253,14 @@ def delete_paper(paper_id: int, db: Session = Depends(get_db), current_user: Use
 
     project_id = paper.project_id
     paper_title = paper.title
+    remote_key = paper.storage_path or paper.file_path
 
-    # Remove from ChromaDB
-    vector_store.delete_paper_chunks(project_id, paper_id)
+    # Remove vector chunks
+    vector_store.delete_paper_chunks(project_id, paper_id, db=db)
 
-    # Remove file from disk
-    if os.path.exists(paper.file_path):
-        try:
-            os.remove(paper.file_path)
-        except Exception:
-            pass
+    # Remove from Supabase Storage if configured
+    if remote_key:
+        storage_service.delete_pdf(remote_key)
 
     db.delete(paper)
 

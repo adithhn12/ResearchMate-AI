@@ -2,7 +2,14 @@ from datetime import datetime
 import json
 from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, Boolean
 from sqlalchemy.orm import relationship
-from app.database import Base
+from app.config import settings
+from app.database import Base, is_postgres
+
+if is_postgres:
+    from pgvector.sqlalchemy import Vector
+    EmbeddingColumnType = Vector(settings.EMBEDDING_DIMENSIONS)
+else:
+    EmbeddingColumnType = Text
 
 class User(Base):
     __tablename__ = "users"
@@ -47,6 +54,7 @@ class Paper(Base):
     publication_year = Column(Integer, nullable=True)
     keywords = Column(String(500), nullable=True)
     file_path = Column(String(500), nullable=False)
+    storage_path = Column(String(500), nullable=True)
     file_name = Column(String(255), nullable=False)
     file_size = Column(Integer, nullable=True)  # in bytes
     page_count = Column(Integer, default=0)
@@ -62,11 +70,15 @@ class PaperChunk(Base):
     __tablename__ = "paper_chunks"
 
     id = Column(Integer, primary_key=True, index=True)
-    paper_id = Column(Integer, ForeignKey("papers.id"), nullable=False)
+    paper_id = Column(Integer, ForeignKey("papers.id"), nullable=False, index=True)
+    project_id = Column(Integer, ForeignKey("projects.id"), nullable=True, index=True)
     chunk_index = Column(Integer, nullable=False)
     page_number = Column(Integer, nullable=False)
     content = Column(Text, nullable=False)
     token_count = Column(Integer, default=0)
+    embedding_model = Column(String(100), nullable=True)
+    embedding_dimensions = Column(Integer, nullable=True)
+    embedding = Column(EmbeddingColumnType, nullable=True)
 
     paper = relationship("Paper", back_populates="chunks")
 

@@ -16,23 +16,16 @@ class GeminiService:
             print("Warning: GEMINI_API_KEY is not configured.")
             return
 
-        # Attempt google.genai first (newest SDK), fallback to google.generativeai
         try:
             from google import genai
             self.genai_client = genai.Client(api_key=self.api_key)
             self.client_type = "genai"
-        except Exception:
-            try:
-                import google.generativeai as legacy_genai
-                legacy_genai.configure(api_key=self.api_key)
-                self.legacy_model = legacy_genai.GenerativeModel(self.model_name)
-                self.client_type = "legacy"
-            except Exception as e:
-                print(f"Error initializing Gemini SDK: {e}")
-                self.client_type = None
+        except Exception as e:
+            print(f"Error initializing Gemini SDK: {e}")
+            self.client_type = None
 
     def _call_model(self, prompt: str, temperature: float = 0.2) -> str:
-        """Call Gemini model with configured SDK and automatic cascade."""
+        """Call Gemini model with official google-genai SDK and automatic cascade."""
         if not self.api_key:
             raise ValueError("GEMINI_API_KEY is not configured. Please check your .env file.")
 
@@ -43,7 +36,6 @@ class GeminiService:
             "gemini-flash-latest",
             "gemini-3.1-flash-lite"
         ]
-        # remove duplicates keeping order
         seen = set()
         unique_models = []
         for m in models_to_try:
@@ -53,7 +45,6 @@ class GeminiService:
 
         last_error = None
         for m in unique_models:
-            # 1. Try modern google-genai (reuse singleton client)
             try:
                 if not getattr(self, "genai_client", None):
                     from google import genai
@@ -62,20 +53,6 @@ class GeminiService:
                     model=m,
                     contents=prompt,
                     config={"temperature": temperature}
-                )
-                if response and response.text:
-                    return response.text
-            except Exception as e:
-                last_error = e
-
-            # 2. Try legacy google.generativeai
-            try:
-                import google.generativeai as legacy_genai
-                legacy_genai.configure(api_key=self.api_key)
-                model = legacy_genai.GenerativeModel(m)
-                response = model.generate_content(
-                    prompt,
-                    generation_config=legacy_genai.types.GenerationConfig(temperature=temperature)
                 )
                 if response and response.text:
                     return response.text
