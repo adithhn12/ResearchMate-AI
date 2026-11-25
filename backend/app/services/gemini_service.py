@@ -1,13 +1,23 @@
-import os
 import json
+import logging
 import re
+import time
 from typing import List, Dict, Any, Optional
 from app.config import settings
+
+logger = logging.getLogger("researchmate.gemini")
+
+
+def _is_transient_error(exc: Exception) -> bool:
+    """Return True for transient HTTP 503, 429, or 500 service errors."""
+    msg = str(exc)
+    return any(code in msg for code in ("503", "429", "500", "UNAVAILABLE", "RESOURCE_EXHAUSTED", "INTERNAL"))
+
 
 class GeminiService:
     def __init__(self):
         self.api_key = settings.GEMINI_API_KEY
-        self.model_name = settings.GEMINI_MODEL or "gemini-2.5-flash"
+        self.model_name = settings.GEMINI_MODEL or "gemini-3.5-flash-lite"
         self._init_client()
 
     def _init_client(self):
@@ -25,16 +35,20 @@ class GeminiService:
             self.client_type = None
 
     def _call_model(self, prompt: str, temperature: float = 0.2) -> str:
-        """Call Gemini model with official google-genai SDK and automatic cascade."""
+        """
+        Call Gemini model with official google-genai SDK, bounded exponential-backoff retries
+        (max 3 attempts) for transient 503/429/500 errors, and verified model fallback cascade.
+        """
         if not self.api_key:
             raise ValueError("GEMINI_API_KEY is not configured. Please check your .env file.")
 
         models_to_try = [
             self.model_name,
-            "gemini-flash-lite-latest",
+            "gemini-3.5-flash-lite",
+            "gemini-3.6-flash",
+            "gemini-3.5-flash",
             "gemini-3.8-flash",
-            "gemini-flash-latest",
-            "gemini-3.1-flash-lite"
+            "gemini-3.1-flash-lite",
         ]
         seen = set()
         unique_models = []
@@ -43,21 +57,35 @@ class GeminiService:
                 seen.add(m)
                 unique_models.append(m)
 
+        if not getattr(self, "genai_client", None):
+            from google import genai
+            self.genai_client = genai.Client(api_key=self.api_key)
+
+        max_attempts = 3
         last_error = None
+
         for m in unique_models:
-            try:
-                if not getattr(self, "genai_client", None):
-                    from google import genai
-                    self.genai_client = genai.Client(api_key=self.api_key)
-                response = self.genai_client.models.generate_content(
-                    model=m,
-                    contents=prompt,
-                    config={"temperature": temperature}
-                )
-                if response and response.text:
-                    return response.text
-            except Exception as e:
-                last_error = e
+            for attempt in range(1, max_attempts + 1):
+                try:
+                    response = self.genai_client.models.generate_content(
+                        model=m,
+                        contents=prompt,
+                        config={"temperature": temperature},
+                    )
+                    if response and response.text:
+                        return response.text
+                except Exception as e:
+                    last_error = e
+                    if _is_transient_error(e) and attempt < max_attempts:
+                        backoff_seconds = 1.0 * (2 ** (attempt - 1))  # 1s, 2s
+                        logger.warning(
+                            f"Transient Gemini error on {m} (attempt {attempt}/{max_attempts}); "
+                            f"retrying in {backoff_seconds:.1f}s..."
+                        )
+                        time.sleep(backoff_seconds)
+                        continue
+                    # Non-transient error (e.g. 404) or max attempts exhausted -> try next fallback model
+                    break
 
         if last_error:
             raise last_error
