@@ -7,8 +7,9 @@ from fastapi.testclient import TestClient
 from app.config import settings
 from app.database import SessionLocal
 from app.main import app
-from app.models import PaperChunk
+from app.models import Paper, PaperChunk
 from app.services.embedding_service import embedding_service
+from app.services.pdf_service import PDFService
 from app.services.vector_store import vector_store
 
 client = TestClient(app)
@@ -190,5 +191,123 @@ def test_upload_error_handling_and_limits():
         )
         assert resp_limit.status_code == 400
         assert "Maximum" in resp_limit.json()["detail"]
+    finally:
+        client.delete(f"/api/v1/projects/{project_id}", headers=headers)
+
+
+def test_nul_byte_sanitization_unicode_and_empty_chunks():
+    """Verify NUL (0x00) byte removal preserves Unicode/math and skips empty sanitized chunks."""
+    # 1. Single and multiple NUL bytes removed, Unicode & math symbols preserved
+    raw = "Attention\x00\x00 mechanism: ∑ᵢ αᵢ xᵢ ≥ √(2π) — ∀ i ∈ ℝⁿ\x00."
+    cleaned = PDFService.sanitize_text(raw)
+    assert "\x00" not in cleaned
+    assert cleaned == "Attention mechanism: ∑ᵢ αᵢ xᵢ ≥ √(2π) — ∀ i ∈ ℝⁿ."
+
+    # 2. Text that becomes empty after NUL sanitization is skipped safely
+    pages = [
+        {"page_number": 1, "text": "\x00\x00   \x00\x00"},
+        {
+            "page_number": 2,
+            "text": "Valid\x00 research\x00\x00 content with math ∑ᵢ αᵢ xᵢ ≥ 0 and enough words to form a chunk cleanly.",
+        },
+    ]
+    chunks = PDFService.chunk_document(pages, chunk_size=180, overlap=35)
+    assert len(chunks) == 1
+    assert chunks[0]["page_number"] == 2
+    assert "\x00" not in chunks[0]["content"]
+    assert "∑ᵢ αᵢ xᵢ ≥ 0" in chunks[0]["content"]
+
+
+def test_postgresql_sanitized_chunk_insertion_and_idempotent_retry(monkeypatch):
+    """
+    Verify chunks with NUL bytes are sanitized before PostgreSQL insertion (no DataError)
+    and retrying the same PDF does not create duplicate Paper or PaperChunk records.
+    """
+    headers = _get_auth_headers()
+    proj_resp = client.post(
+        "/api/v1/projects",
+        json={"name": "NUL Sanitization PG Test", "description": "Regression test for 0x00 bytes"},
+        headers=headers,
+    )
+    assert proj_resp.status_code == 200
+    project_id = proj_resp.json()["id"]
+
+    # Inject a PDF whose extracted text contains NUL bytes and Unicode math
+    pdf_bytes = _make_pdf_bytes(
+        "Math & Unicode Paper",
+        [
+            "Abstract: Transformer attention ∑ᵢ αᵢ xᵢ ≥ √(2π) with embedded NUL bytes.",
+        ],
+    )
+
+    orig_extract_all = PDFService.extract_all
+
+    def _extract_with_nul(file_path: str, file_name: str):
+        pages, total_pages, meta = orig_extract_all(file_path, file_name)
+        pages[0]["text"] = PDFService.sanitize_text(
+            "Abstract\x00\x00: Transformer attention\x00 ∑ᵢ αᵢ xᵢ ≥ √(2π) — ∀ i ∈ ℝⁿ."
+        )
+        # Also test defensive sanitization in vector_store.add_paper_chunks directly
+        return pages, total_pages, meta
+
+    monkeypatch.setattr(PDFService, "extract_all", staticmethod(_extract_with_nul))
+
+    try:
+        # First upload
+        r1 = client.post(
+            "/api/v1/papers/upload",
+            data={"project_id": str(project_id)},
+            files=[("files", ("nul_test_paper.pdf", io.BytesIO(pdf_bytes), "application/pdf"))],
+            headers=headers,
+        )
+        assert r1.status_code == 200, r1.text
+        p1 = r1.json()[0]
+        assert p1["status"] == "indexed"
+
+        # Defensive check: insert chunk containing raw \x00 directly through vector_store
+        with SessionLocal() as db:
+            vector_store.add_paper_chunks(
+                project_id=project_id,
+                paper_id=p1["id"],
+                paper_title=p1["title"],
+                chunks=[
+                    {
+                        "chunk_index": 0,
+                        "page_number": 1,
+                        "content": "Direct\x00\x00 NUL\x00 chunk ∑ᵢ αᵢ xᵢ ≥ √(2π)",
+                    },
+                    {
+                        "chunk_index": 1,
+                        "page_number": 1,
+                        "content": "\x00\x00   \x00",  # empty after sanitization -> must be skipped
+                    },
+                ],
+                db=db,
+            )
+            db.commit()
+
+            rows = db.query(PaperChunk).filter(PaperChunk.paper_id == p1["id"]).all()
+            assert len(rows) == 1
+            assert "\x00" not in rows[0].content
+            assert "∑ᵢ αᵢ xᵢ ≥ √(2π)" in rows[0].content
+
+        # Retry uploading the exact same PDF -> must reuse Paper ID and not duplicate records
+        r2 = client.post(
+            "/api/v1/papers/upload",
+            data={"project_id": str(project_id)},
+            files=[("files", ("nul_test_paper.pdf", io.BytesIO(pdf_bytes), "application/pdf"))],
+            headers=headers,
+        )
+        assert r2.status_code == 200, r2.text
+        p2 = r2.json()[0]
+        assert p2["id"] == p1["id"]
+
+        with SessionLocal() as db:
+            paper_count = (
+                db.query(Paper)
+                .filter(Paper.project_id == project_id, Paper.file_name == "nul_test_paper.pdf")
+                .count()
+            )
+            assert paper_count == 1
     finally:
         client.delete(f"/api/v1/projects/{project_id}", headers=headers)

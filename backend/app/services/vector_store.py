@@ -8,6 +8,7 @@ from app.config import settings
 from app.database import SessionLocal, is_postgres
 from app.models import Paper, PaperChunk
 from app.services.embedding_service import embedding_service
+from app.services.pdf_service import PDFService
 
 logger = logging.getLogger("researchmate.vector_store")
 
@@ -54,6 +55,17 @@ class VectorStoreService:
         if not chunks:
             return
 
+        # Defensive sanitization: strip NUL bytes and skip empty chunks before DB insertion
+        sanitized_chunks: List[Dict[str, Any]] = []
+        for ch in chunks:
+            clean_content = PDFService.sanitize_text(ch.get("content")).strip()
+            if not clean_content:
+                continue
+            sanitized_chunks.append({**ch, "content": clean_content})
+
+        if not sanitized_chunks:
+            return
+
         owns_session = db is None
         session = db or SessionLocal()
         batch_size = embedding_service.batch_size
@@ -64,8 +76,8 @@ class VectorStoreService:
                 synchronize_session=False
             )
 
-            for i in range(0, len(chunks), batch_size):
-                batch = chunks[i : i + batch_size]
+            for i in range(0, len(sanitized_chunks), batch_size):
+                batch = sanitized_chunks[i : i + batch_size]
                 texts = [c["content"] for c in batch]
                 vectors = embedding_service.embed_documents(texts)
 

@@ -93,19 +93,41 @@ def upload_papers(
                 )
 
             object_key = f"project_{project_id}/{uuid.uuid4().hex}_{base_name}"
-            paper = Paper(
-                project_id=project_id,
-                title=os.path.splitext(base_name)[0],
-                file_name=base_name,
-                file_path=object_key,
-                storage_path=object_key if storage_service.is_configured() else None,
-                file_size=file_size,
-                status="processing",
+            previous_remote_key = None
+
+            # Idempotent retry: reuse existing paper with same file_name in this project
+            # instead of creating duplicate Paper or PaperChunk records.
+            paper = (
+                db.query(Paper)
+                .filter(Paper.project_id == project_id, Paper.file_name == base_name)
+                .first()
             )
-            db.add(paper)
+            if paper:
+                previous_remote_key = paper.storage_path
+                paper.file_path = object_key
+                paper.storage_path = None
+                paper.file_size = file_size
+                paper.status = "processing"
+                paper.error_message = None
+                db.query(PaperChunk).filter(PaperChunk.paper_id == paper.id).delete(
+                    synchronize_session=False
+                )
+            else:
+                paper = Paper(
+                    project_id=project_id,
+                    title=os.path.splitext(base_name)[0],
+                    file_name=base_name,
+                    file_path=object_key,
+                    storage_path=None,
+                    file_size=file_size,
+                    status="processing",
+                )
+                db.add(paper)
+
             db.commit()
             db.refresh(paper)
 
+            uploaded_remote_key = None
             try:
                 if file_size == 0:
                     raise ValueError(f"Uploaded file '{base_name}' is empty (0 bytes).")
@@ -115,7 +137,7 @@ def upload_papers(
                 if header != b"%PDF-":
                     raise ValueError(f"File '{base_name}' does not have a valid PDF header.")
 
-                # 1. Single-pass PDF text, page count & basic metadata extraction
+                # 1. Single-pass PDF text, page count & basic metadata extraction (sanitized)
                 pages, total_pages, basic_meta = PDFService.extract_all(temp_path, base_name)
                 if total_pages > settings.MAX_PDF_PAGES:
                     raise ValueError(
@@ -123,15 +145,15 @@ def upload_papers(
                     )
                 paper.page_count = total_pages
 
-                # 2. Refine metadata with Gemini (falls back cleanly to basic_meta)
+                # 2. Refine metadata with Gemini (sanitize defensively)
                 first_pages_text = "\n".join([p["text"] for p in pages[:2]])
                 refined_meta = gemini_service.extract_paper_metadata(first_pages_text, basic_meta)
 
-                paper.title = refined_meta.get("title") or basic_meta["title"]
-                paper.authors = refined_meta.get("authors") or basic_meta["authors"]
-                paper.abstract = refined_meta.get("abstract") or basic_meta["abstract"]
+                paper.title = PDFService.sanitize_text(refined_meta.get("title") or basic_meta["title"])[:500]
+                paper.authors = PDFService.sanitize_text(refined_meta.get("authors") or basic_meta["authors"])[:500]
+                paper.abstract = PDFService.sanitize_text(refined_meta.get("abstract") or basic_meta["abstract"])
                 paper.publication_year = refined_meta.get("publication_year") or basic_meta["publication_year"]
-                paper.keywords = refined_meta.get("keywords") or basic_meta["keywords"]
+                paper.keywords = PDFService.sanitize_text(refined_meta.get("keywords") or basic_meta["keywords"])[:500]
 
                 # 3. Bounded chunking (180 words, 35 overlap)
                 chunks = PDFService.chunk_document(pages, chunk_size=180, overlap=35)
@@ -140,13 +162,7 @@ def upload_papers(
                 if not chunks:
                     raise ValueError(f"No indexable text chunks could be extracted from '{base_name}'.")
 
-                # 4. Upload PDF to Supabase Storage if configured
-                if storage_service.is_configured():
-                    remote_path = storage_service.upload_pdf(temp_path, object_key)
-                    paper.storage_path = remote_path
-                    paper.file_path = remote_path
-
-                # 5. Generate external Gemini embeddings in bounded batches and store in pgvector
+                # 4. Generate external Gemini embeddings in bounded batches and stage chunks in pgvector
                 vector_store.add_paper_chunks(
                     project_id=project_id,
                     paper_id=paper.id,
@@ -155,9 +171,19 @@ def upload_papers(
                     db=db,
                 )
 
+                # 5. Upload PDF to Supabase Storage only after text/chunk/embedding succeeded
+                if storage_service.is_configured():
+                    uploaded_remote_key = storage_service.upload_pdf(temp_path, object_key)
+                    paper.storage_path = uploaded_remote_key
+                    paper.file_path = uploaded_remote_key
+
                 paper.status = "indexed"
                 db.commit()
                 db.refresh(paper)
+
+                # Clean up superseded remote PDF object on successful retry
+                if previous_remote_key and previous_remote_key != uploaded_remote_key:
+                    storage_service.delete_pdf(previous_remote_key)
 
                 log = ActivityLog(
                     user_id=current_user.id,
@@ -171,8 +197,12 @@ def upload_papers(
             except Exception as e:
                 logger.exception(f"Error processing paper '{base_name}': {e}")
                 db.rollback()
+                # Clean up any newly uploaded remote PDF if DB commit failed
+                if uploaded_remote_key:
+                    storage_service.delete_pdf(uploaded_remote_key)
+                paper.storage_path = previous_remote_key
                 paper.status = "failed"
-                paper.error_message = str(e)[:1000]
+                paper.error_message = PDFService.sanitize_text(str(e))[:1000]
                 db.commit()
                 db.refresh(paper)
             finally:
